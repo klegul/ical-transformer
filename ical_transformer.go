@@ -2,12 +2,16 @@ package main
 
 import (
 	"fmt"
+	"log"
+	"net/http"
+	"time"
+
 	"github.com/BurntSushi/toml"
 	"github.com/alexflint/go-arg"
 	ics "github.com/arran4/golang-ical"
-	"log"
-	"net/http"
 )
+
+const DateTimeFormat = "20060102T150405"
 
 type Config struct {
 	Original string
@@ -16,8 +20,14 @@ type Config struct {
 }
 
 type Event struct {
-	Summary     string
-	Exdates_add []string
+	Summary string
+	Changes []Change
+}
+
+type Change struct {
+	Date     time.Time
+	Canceled bool
+	Location string
 }
 
 func main() {
@@ -62,9 +72,12 @@ func serveServer(config Config) {
 
 	http.HandleFunc(config.Path, func(writer http.ResponseWriter, request *http.Request) {
 		cal := getOriginal(config)
-		processTransforms(cal, config)
+		err := processTransforms(cal, config)
+		if err != nil {
+			log.Printf("Error while processing %s: %s\n", config.Path, err)
+		}
 
-		_, err := fmt.Fprint(writer, cal.Serialize())
+		_, err = fmt.Fprint(writer, cal.Serialize())
 		if err != nil {
 			log.Fatalf("error while printing to response writer: %s\n", err)
 		}
@@ -87,7 +100,7 @@ func getOriginal(config Config) *ics.Calendar {
 	return cal
 }
 
-func processTransforms(cal *ics.Calendar, config Config) {
+func processTransforms(cal *ics.Calendar, config Config) error {
 	for uid, configEvent := range config.Events {
 		event := getEventByUID(cal.Components, uid)
 		if event == nil {
@@ -98,12 +111,65 @@ func processTransforms(cal *ics.Calendar, config Config) {
 			event.SetSummary(configEvent.Summary)
 		}
 
-		if len(configEvent.Exdates_add) > 0 {
-			for _, exdate := range configEvent.Exdates_add {
-				event.AddExdate(exdate)
+		for i, change := range configEvent.Changes {
+			if change.Canceled {
+				startTime, err := event.GetStartAt()
+				if err != nil {
+					return err
+				}
+				event.AddExdate(getAlignedTime(startTime, change.Date).Format(DateTimeFormat),
+					getTimeZoneProperty(startTime))
+				continue
+			}
+
+			if change.Location != "" {
+				startTime, err := event.GetStartAt()
+				if err != nil {
+					return err
+				}
+				event.AddExdate(getAlignedTime(startTime, change.Date).Format(DateTimeFormat),
+					getTimeZoneProperty(startTime))
+
+				oldDescription := ""
+				oldDescriptionProp := event.GetProperty(ics.ComponentPropertyDescription)
+				if oldDescriptionProp != nil {
+					oldDescription = oldDescriptionProp.Value
+				}
+
+				newEvent := ics.NewEvent(event.Id() + "-ical-transformer-" + fmt.Sprint(i))
+				newEvent.SetSummary(configEvent.Summary)
+				newEvent.SetLocation(change.Location)
+				newEvent.SetDescription(oldDescription)
+
+				dtStampTime, err := event.GetDtStampTime()
+				if err != nil {
+					return err
+				}
+				newEvent.SetDtStampTime(dtStampTime)
+
+				newStartTime := getAlignedTime(startTime, change.Date)
+				newEvent.SetStartAt(newStartTime)
+
+				endTime, err := event.GetEndAt()
+				if err != nil {
+					return err
+				}
+				newEvent.SetEndAt(getAlignedTime(endTime, change.Date))
+
+				cal.Components = append(cal.Components, newEvent)
 			}
 		}
 	}
+
+	return nil
+}
+
+func getTimeZoneProperty(date time.Time) ics.PropertyParameter {
+	return ics.WithTZID(date.Location().String())
+}
+
+func getAlignedTime(eventTime time.Time, date time.Time) time.Time {
+	return time.Date(date.Year(), date.Month(), date.Day(), eventTime.Hour(), eventTime.Minute(), 0, 0, eventTime.Location())
 }
 
 func printAllEvents(events []*ics.VEvent) {
