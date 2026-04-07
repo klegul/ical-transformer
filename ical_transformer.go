@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"regexp"
 	"time"
 
 	"github.com/BurntSushi/toml"
@@ -17,6 +18,7 @@ type Config struct {
 	Original string
 	Path     string
 	Events   map[string]Event
+	Global   []GlobalRule
 }
 
 type Event struct {
@@ -28,6 +30,11 @@ type Change struct {
 	Date     time.Time
 	Canceled bool
 	Location string
+}
+
+type GlobalRule struct {
+	Match   string
+	Replace string
 }
 
 func main() {
@@ -101,6 +108,16 @@ func getOriginal(config Config) *ics.Calendar {
 }
 
 func processTransforms(cal *ics.Calendar, config Config) error {
+	if err := processGlobal(cal, config); err != nil {
+		return err
+	}
+	if err := processEvents(cal, config); err != nil {
+		return err
+	}
+	return nil
+}
+
+func processEvents(cal *ics.Calendar, config Config) error {
 	for uid, configEvent := range config.Events {
 		event := getEventByUID(cal.Components, uid)
 		if event == nil {
@@ -130,16 +147,23 @@ func processTransforms(cal *ics.Calendar, config Config) error {
 				event.AddExdate(getAlignedTime(startTime, change.Date).Format(DateTimeFormat),
 					getTimeZoneProperty(startTime))
 
-				oldDescription := ""
+				summary := ""
+				if configEvent.Summary != "" {
+					summary = configEvent.Summary
+				} else if event.GetProperty(ics.ComponentPropertySummary) != nil {
+					summary = event.GetProperty(ics.ComponentPropertySummary).Value
+				}
+
+				description := ""
 				oldDescriptionProp := event.GetProperty(ics.ComponentPropertyDescription)
 				if oldDescriptionProp != nil {
-					oldDescription = oldDescriptionProp.Value
+					description = oldDescriptionProp.Value
 				}
 
 				newEvent := ics.NewEvent(event.Id() + "-ical-transformer-" + fmt.Sprint(i))
-				newEvent.SetSummary(configEvent.Summary)
+				newEvent.SetSummary(summary)
 				newEvent.SetLocation(change.Location)
-				newEvent.SetDescription(oldDescription)
+				newEvent.SetDescription(description)
 
 				dtStampTime, err := event.GetDtStampTime()
 				if err != nil {
@@ -160,7 +184,21 @@ func processTransforms(cal *ics.Calendar, config Config) error {
 			}
 		}
 	}
+	return nil
+}
 
+func processGlobal(cal *ics.Calendar, config Config) error {
+	for _, rule := range config.Global {
+		r, _ := regexp.Compile(rule.Match)
+
+		for _, event := range cal.Events() {
+			summaryProp := event.GetProperty(ics.ComponentPropertySummary)
+			if summaryProp != nil {
+				event.SetSummary(r.ReplaceAllString(summaryProp.Value, rule.Replace))
+			}
+
+		}
+	}
 	return nil
 }
 
