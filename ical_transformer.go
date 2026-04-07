@@ -104,6 +104,11 @@ func getOriginal(config Config) *ics.Calendar {
 		log.Fatalf("Error while parsing ical: %s\n", err)
 	}
 
+	err = res.Body.Close()
+	if err != nil {
+		log.Fatalf("Error closing response body: %s\n", err)
+	}
+
 	return cal
 }
 
@@ -150,8 +155,8 @@ func processEvents(cal *ics.Calendar, config Config) error {
 				summary := ""
 				if configEvent.Summary != "" {
 					summary = configEvent.Summary
-				} else if event.GetProperty(ics.ComponentPropertySummary) != nil {
-					summary = event.GetProperty(ics.ComponentPropertySummary).Value
+				} else if summaryBody := event.GetProperty(ics.ComponentPropertySummary); summaryBody != nil {
+					summary = summaryBody.Value
 				}
 
 				description := ""
@@ -212,7 +217,12 @@ func getAlignedTime(eventTime time.Time, date time.Time) time.Time {
 
 func printAllEvents(events []*ics.VEvent) {
 	for _, event := range events {
-		fmt.Printf("Event (%s)\n", event.GetProperty(ics.ComponentPropertyUniqueId).Value)
+		uniqueId := event.GetProperty(ics.ComponentPropertyUniqueId)
+		if uniqueId == nil {
+			continue
+		}
+
+		fmt.Printf("Event (%s)\n", uniqueId.Value)
 		for _, property := range event.Properties {
 			fmt.Printf(" - %s: %s\n", property.IANAToken, property.Value)
 		}
